@@ -10,11 +10,12 @@
   [#91503](https://github.com/vercel/next.js/pull/91503), which removed the
   `devCacheControlNoCache` experimental option and hard-coded `no-cache`.
 
-  ## Repro
+## Repro
 
   ```bash
   pnpm install
   pnpm dev
+  ```
 
   1. Open http://localhost:3000/ in Chrome.
   2. Wait for the page to render hydrated ✅.
@@ -92,4 +93,24 @@ devCacheControlNoCache experimental option (hard-code no-cache)
   script can force a reload on bf-nav into a non-bfcached page:
 
   <script>
-    window.addEventListener("pageshow", (e)
+      window.addEventListener("pageshow", (e) => {
+    if (e.persisted) return; // bfcache hit — state is intact
+    const nav = performance.getEntriesByType("navigation")[0];
+    if (nav?.type === "back_forward") location.reload();
+  });
+</script>
+
+Setting Cache-Control: no-store via next.config.ts headers() or
+middleware does not override the dev-server-injected header.
+
+Environment
+
+- Next.js 16.2.3 (broken) / 16.0.9 (works)
+- React 18
+- Chrome 138, macOS 15
+- Turbopack (default in 16.x)
+
+Related
+
+- PR #91503 (https://github.com/vercel/next.js/pull/91503) — Remove
+devCacheControlNoCache experimental option (hard-code no-cache)
