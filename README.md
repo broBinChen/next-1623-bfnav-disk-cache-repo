@@ -1,36 +1,95 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# next-1623-bfnav-disk-cache-repro
 
-## Getting Started
+  Minimal reproduction for: in `next dev` 16.1+, Chrome's back/forward
+  navigation lands on a stale disk-cached HTML response, and Turbopack's
+  RSC bootstrap silently fails to hydrate. The page stays on the SSR
+  placeholder forever — no console errors, no failed requests.
 
-First, run the development server:
+  Fixed in 16.0.9 by `Cache-Control: no-store, must-revalidate` (Chrome
+  cannot disk-cache the document). Broken from 16.1+ after PR
+  [#91503](https://github.com/vercel/next.js/pull/91503), which removed the
+  `devCacheControlNoCache` experimental option and hard-coded `no-cache`.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+  ## Repro
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+  ```bash
+  pnpm install
+  pnpm dev
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+  1. Open http://localhost:3000/ in Chrome.
+  2. Wait for the page to render hydrated ✅.
+  3. Navigate the address bar to any external site, e.g. https://example.com/.
+  4. Click Back.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+  Expected
 
-## Learn More
+  Page shows hydrated ✅ (or briefly re-renders on a fresh request, then hydrates).
 
-To learn more about Next.js, take a look at the following resources:
+  Actual (Next.js 16.2.3)
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+  Page is stuck on SSR placeholder ⏳. useEffect never runs.
+  DevTools → Network → localhost document: 200 (from disk cache),
+  Cache-Control: no-cache, must-revalidate. No errors anywhere.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+  Bisect
 
-## Deploy on Vercel
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Workaround (app-side)
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Until the upstream change is reverted/adjusted, dev-only client
+script can force a reload on bf-nav into a non-bfcached page:
+
+<script>
+  window.addEventListener("pageshow", (e) => {
+    if (e.persisted) return; // bfcache hit — state is intact
+    const nav = performance.getEntriesByType("navigation")[0];
+    if (nav?.type === "back_forward") location.reload();
+  });
+</script>
+
+Setting Cache-Control: no-store via next.config.ts headers() or
+middleware does not override the dev-server-injected header.
+
+Environment
+
+- Next.js 16.2.3 (broken) / 16.0.9 (works)
+- React 19
+- Chrome 148, macOS 26.5
+- Turbopack (default in 16.x)
+
+Related
+
+- PR #91503 (https://github.com/vercel/next.js/pull/91503) — Remove
+devCacheControlNoCache experimental option (hard-code no-cache)
+
+  ┌─────────┬───────────────────────────┬─────────────────────────────┐
+  │ Next.js │     dev Cache-Control     │     Back/forward result     │
+  ├─────────┼───────────────────────────┼─────────────────────────────┤
+  │ 16.0.9  │ no-store, must-revalidate │ hydrates ✅                 │
+  ├─────────┼───────────────────────────┼─────────────────────────────┤
+  │ 16.2.3  │ no-cache, must-revalidate │ stuck on SSR placeholder ❌ │
+  └─────────┴───────────────────────────┴─────────────────────────────┘
+
+  To verify, swap the next version in package.json, reinstall, and
+  repeat the steps above.
+
+  Why it happens
+
+  - Per HTTP/1.1 and Chrome's documented behavior, Cache-Control: no-cache requires revalidation before reuse — except for
+  back/forward navigation, where Chrome is allowed to skip
+  revalidation and serve from disk cache.
+  - The disk-cached HTML carries __next_f.push(...) payload tied to
+  the previous dev-server session/build.
+  - Turbopack's RSC bootstrap consumes this stale payload and silently
+  no-ops, so React never mounts. No error is surfaced.
+
+  no-store avoided this because Chrome cannot disk-cache the response
+  in the first place.
+
+  Workaround (app-side)
+
+  Until the upstream change is reverted/adjusted, dev-only client
+  script can force a reload on bf-nav into a non-bfcached page:
+
+  <script>
+    window.addEventListener("pageshow", (e)
